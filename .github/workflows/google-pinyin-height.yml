@@ -2,8 +2,7 @@ name: google-pinyin-height
 
 on:
   push:
-    branches:
-      - tmp/google-pinyin-height
+    branches: [tmp/google-pinyin-height]
   workflow_dispatch:
 
 jobs:
@@ -11,49 +10,32 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Download Google Pinyin 4.5.2 arm64 APK
+      - name: Download APK and apktool 2.9.3
         shell: bash
         run: |
           set -euxo pipefail
-          curl -L --fail --retry 3 --retry-delay 2 \
-            -A 'Mozilla/5.0' \
+          curl -L --fail --retry 3 -A 'Mozilla/5.0' \
             'https://d.apkpure.net/b/APK/com.google.android.inputmethod.pinyin?versionCode=4520313' \
             -o google-pinyin.apk
+          curl -L --fail \
+            'https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar' \
+            -o apktool.jar
           unzip -t google-pinyin.apk >/dev/null
           sha256sum google-pinyin.apk | tee original-sha256.txt
 
-      - name: Install apktool
-        shell: bash
-        run: |
-          set -euxo pipefail
-          APKTOOL_URL=$(curl -fsSL https://api.github.com/repos/iBotPeaches/Apktool/releases/latest \
-            | jq -r '.assets[] | select(.name | test("^apktool_[0-9].*\\.jar$")) | .browser_download_url' \
-            | head -n1)
-          test -n "$APKTOOL_URL"
-          curl -L --fail "$APKTOOL_URL" -o apktool.jar
-
-      - name: Decode and patch height presets
+      - name: Decode and patch only keyboard height arrays
         shell: bash
         run: |
           set -euxo pipefail
           java -jar apktool.jar d -f google-pinyin.apk -o decoded
           python3 - <<'PY'
           from pathlib import Path
-
           p = Path('decoded/res/values/arrays.xml')
           s = p.read_text(encoding='utf-8')
 
-          old_entries = '''    <string-array name="entries_keyboard_height_ratio">
-                  <item>@string/kb_height_short</item>
-                  <item>@string/kb_height_midshort</item>
-                  <item>@string/kb_height_normal</item>
-                  <item>@string/kb_height_midtall</item>
-                  <item>@string/kb_height_tall</item>
-              </string-array>'''
-          new_entries = '''    <string-array name="entries_keyboard_height_ratio">
+          entries = '''    <string-array name="entries_keyboard_height_ratio">
                   <item>@string/kb_height_short</item>
                   <item>@string/kb_height_midshort</item>
                   <item>@string/kb_height_normal</item>
@@ -68,14 +50,7 @@ jobs:
                   <item>150%</item>
                   <item>155%</item>
               </string-array>'''
-          old_values = '''    <string-array name="entryvalues_keyboard_height_ratio">
-                  <item>0.9</item>
-                  <item>0.95</item>
-                  <item>1.0</item>
-                  <item>1.05</item>
-                  <item>1.1</item>
-              </string-array>'''
-          new_values = '''    <string-array name="entryvalues_keyboard_height_ratio">
+          values = '''    <string-array name="entryvalues_keyboard_height_ratio">
                   <item>0.9</item>
                   <item>0.95</item>
                   <item>1.0</item>
@@ -91,58 +66,45 @@ jobs:
                   <item>1.705</item>
               </string-array>'''
 
-          # apktool indentation may vary; normalize exact blocks by locating tag boundaries.
-          def replace_array(text, name, body):
-              start = text.index(f'    <string-array name="{name}">')
-              end = text.index('    </string-array>', start) + len('    </string-array>')
-              return text[:start] + body + text[end:]
+          def repl(text, name, replacement):
+              a = text.index(f'    <string-array name="{name}">')
+              b = text.index('    </string-array>', a) + len('    </string-array>')
+              return text[:a] + replacement + text[b:]
 
-          s = replace_array(s, 'entries_keyboard_height_ratio', new_entries)
-          s = replace_array(s, 'entryvalues_keyboard_height_ratio', new_values)
+          s = repl(s, 'entries_keyboard_height_ratio', entries)
+          s = repl(s, 'entryvalues_keyboard_height_ratio', values)
           p.write_text(s, encoding='utf-8')
 
-          # Simplified Chinese: make clear that the legacy Tall preset is the 100% baseline.
-          for rel in ('res/values-zh/strings.xml', 'res/values-zh-rCN/strings.xml'):
-              q = Path('decoded') / rel
-              if q.exists():
-                  t = q.read_text(encoding='utf-8')
-                  t = t.replace('<string name="kb_height_tall">高</string>', '<string name="kb_height_tall">高（100%）</string>')
-                  q.write_text(t, encoding='utf-8')
-
-          print('Patched height arrays:')
-          out = p.read_text(encoding='utf-8')
-          for name in ('entries_keyboard_height_ratio', 'entryvalues_keyboard_height_ratio'):
-              a = out.index(f'<string-array name="{name}">')
-              b = out.index('</string-array>', a) + len('</string-array>')
-              print(out[a:b])
+          q = Path('decoded/res/values-zh/strings.xml')
+          if q.exists():
+              t = q.read_text(encoding='utf-8')
+              t = t.replace('<string name="kb_height_tall">高</string>', '<string name="kb_height_tall">高（100%）</string>')
+              q.write_text(t, encoding='utf-8')
           PY
 
-      - name: Rebuild APK
+      - name: Rebuild with legacy AAPT1
         shell: bash
         run: |
           set -euxo pipefail
-          java -jar apktool.jar b decoded -o google-pinyin-height-unsigned.apk
+          java -jar apktool.jar b --use-aapt1 decoded -o google-pinyin-height-unsigned.apk
 
-      - name: Align and sign APK
+      - name: Align, sign and verify
         shell: bash
         run: |
           set -euxo pipefail
           BUILD_TOOLS=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n1)
-          "$BUILD_TOOLS/zipalign" -f -p 4 google-pinyin-height-unsigned.apk google-pinyin-4.5.2-height-presets-aligned.apk
-          keytool -genkeypair -noprompt \
-            -keystore height-mod.jks -storepass android -keypass android \
+          "$BUILD_TOOLS/zipalign" -f -p 4 google-pinyin-height-unsigned.apk google-pinyin-height-aligned.apk
+          keytool -genkeypair -noprompt -keystore height-mod.jks -storepass android -keypass android \
             -alias heightmod -keyalg RSA -keysize 2048 -validity 10000 \
             -dname 'CN=Google Pinyin Height Mod, OU=Local Build, O=Local Build, L=Local, S=Local, C=US'
-          "$BUILD_TOOLS/apksigner" sign \
-            --ks height-mod.jks --ks-key-alias heightmod \
+          "$BUILD_TOOLS/apksigner" sign --ks height-mod.jks --ks-key-alias heightmod \
             --ks-pass pass:android --key-pass pass:android \
-            --out google-pinyin-4.5.2-height-presets.apk \
-            google-pinyin-4.5.2-height-presets-aligned.apk
+            --out google-pinyin-4.5.2-height-presets.apk google-pinyin-height-aligned.apk
           "$BUILD_TOOLS/apksigner" verify --verbose --print-certs google-pinyin-4.5.2-height-presets.apk | tee signature.txt
           "$BUILD_TOOLS/aapt" dump badging google-pinyin-4.5.2-height-presets.apk | head -n 25 | tee badging.txt
           sha256sum google-pinyin-4.5.2-height-presets.apk | tee modified-sha256.txt
 
-      - name: Verify patched resources after rebuild
+      - name: Re-decode final APK and verify height values
         shell: bash
         run: |
           set -euxo pipefail
@@ -150,44 +112,29 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           s = Path('verify-decoded/res/values/arrays.xml').read_text(encoding='utf-8')
-          for expected in ['<item>120%</item>', '<item>155%</item>', '<item>1.32</item>', '<item>1.705</item>']:
-              assert expected in s, expected
-          print('Resource verification passed.')
+          expected = ['<item>120%</item>', '<item>125%</item>', '<item>130%</item>', '<item>135%</item>', '<item>140%</item>', '<item>145%</item>', '<item>150%</item>', '<item>155%</item>', '<item>1.32</item>', '<item>1.375</item>', '<item>1.43</item>', '<item>1.485</item>', '<item>1.54</item>', '<item>1.595</item>', '<item>1.65</item>', '<item>1.705</item>']
+          missing = [x for x in expected if x not in s]
+          assert not missing, missing
+          print('All added height presets verified in final APK.')
           PY
 
-      - name: Write build notes
+      - name: Build notes
         shell: bash
         run: |
           cat > BUILD-NOTES.txt <<'EOF'
-          Google Pinyin Input 4.5.2.193126728 height preset modification
-
-          Original height values:
-          Short 0.90
-          Mid-short 0.95
-          Normal 1.00
-          Mid-tall 1.05
-          Tall 1.10  = baseline 100%
-
-          Added presets relative to Tall (1.10):
-          120% = 1.320
-          125% = 1.375
-          130% = 1.430
-          135% = 1.485
-          140% = 1.540
-          145% = 1.595
-          150% = 1.650
-          155% = 1.705
-
-          The APK is re-signed with a local build key because Google's private signing key is unavailable.
-          It cannot be installed as an in-place update over the official Google-signed APK.
+          Google Pinyin Input 4.5.2.193126728 height preset mod
+          Legacy Tall (1.10) is treated as 100%.
+          Added: 120%=1.320, 125%=1.375, 130%=1.430, 135%=1.485,
+                 140%=1.540, 145%=1.595, 150%=1.650, 155%=1.705.
+          Re-signed with a local build key; it cannot update the official Google-signed APK in place.
           EOF
 
-      - name: Upload APK artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: google-pinyin-4.5.2-height-presets
-          if-no-files-found: error
           retention-days: 7
+          if-no-files-found: error
           path: |
             google-pinyin-4.5.2-height-presets.apk
             BUILD-NOTES.txt
