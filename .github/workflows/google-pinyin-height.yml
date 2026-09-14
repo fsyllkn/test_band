@@ -25,40 +25,40 @@ jobs:
           unzip -t google-pinyin.apk >/dev/null
           sha256sum google-pinyin.apk | tee original-sha256.txt
 
-      - name: Decode and patch UI v3.2
+      - name: Decode and patch UI v3.3
         shell: bash
         run: |
           set -euxo pipefail
           java -jar apktool.jar d -f google-pinyin.apk -o decoded
-          python3 scripts/patch_google_pinyin_ui_v32.py
+          python3 scripts/patch_google_pinyin_ui_v33.py
 
       - name: Rebuild with legacy AAPT1
         shell: bash
         run: |
           set -euxo pipefail
-          java -jar apktool.jar b --use-aapt1 decoded -o google-pinyin-ui-v32-unsigned.apk
+          java -jar apktool.jar b --use-aapt1 decoded -o google-pinyin-ui-v33-unsigned.apk
 
       - name: Align sign and verify
         shell: bash
         run: |
           set -euxo pipefail
           BUILD_TOOLS=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n1)
-          "$BUILD_TOOLS/zipalign" -f -p 4 google-pinyin-ui-v32-unsigned.apk google-pinyin-ui-v32-aligned.apk
-          keytool -genkeypair -noprompt -keystore ui-v32.jks -storepass android -keypass android \
-            -alias uiv32 -keyalg RSA -keysize 2048 -validity 10000 \
-            -dname 'CN=Google Pinyin UI V3.2, OU=Local Build, O=Local Build, L=Local, S=Local, C=US'
-          "$BUILD_TOOLS/apksigner" sign --ks ui-v32.jks --ks-key-alias uiv32 \
+          "$BUILD_TOOLS/zipalign" -f -p 4 google-pinyin-ui-v33-unsigned.apk google-pinyin-ui-v33-aligned.apk
+          keytool -genkeypair -noprompt -keystore ui-v33.jks -storepass android -keypass android \
+            -alias uiv33 -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname 'CN=Google Pinyin UI V3.3, OU=Local Build, O=Local Build, L=Local, S=Local, C=US'
+          "$BUILD_TOOLS/apksigner" sign --ks ui-v33.jks --ks-key-alias uiv33 \
             --ks-pass pass:android --key-pass pass:android \
-            --out google-pinyin-4.5.2-ui-v32.apk google-pinyin-ui-v32-aligned.apk
-          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs google-pinyin-4.5.2-ui-v32.apk | tee signature.txt
-          "$BUILD_TOOLS/aapt" dump badging google-pinyin-4.5.2-ui-v32.apk | head -n 25 | tee badging.txt
-          sha256sum google-pinyin-4.5.2-ui-v32.apk | tee modified-sha256.txt
+            --out google-pinyin-4.5.2-ui-v33.apk google-pinyin-ui-v33-aligned.apk
+          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs google-pinyin-4.5.2-ui-v33.apk | tee signature.txt
+          "$BUILD_TOOLS/aapt" dump badging google-pinyin-4.5.2-ui-v33.apk | head -n 25 | tee badging.txt
+          sha256sum google-pinyin-4.5.2-ui-v33.apk | tee modified-sha256.txt
 
       - name: Re-decode final APK and verify resources
         shell: bash
         run: |
           set -euxo pipefail
-          java -jar apktool.jar d -f google-pinyin-4.5.2-ui-v32.apk -o verify-decoded
+          java -jar apktool.jar d -f google-pinyin-4.5.2-ui-v33.apk -o verify-decoded
           python3 - <<'PY'
           from pathlib import Path
           arrays = Path('verify-decoded/res/values/arrays.xml').read_text(encoding='utf-8')
@@ -69,43 +69,43 @@ jobs:
           upper = Path('verify-decoded/res/layout/softkey_qwerty_label_character_label_footer_uiv3.xml').read_text(encoding='utf-8')
           assert 'android:textSize="32.0dip"' in lower
           assert 'android:textSize="29.0dip"' in upper
-          zh = Path('verify-decoded/res/xml/softkeys_input_zh_pinyin_qwerty.xml').read_text(encoding='utf-8')
-          assert 'softkey_template_pinyin_qwerty" layout="@layout/softkey_qwerty_label_character_label_footer_lower32"' in zh
-          assert 'softkey_template_pinyin_qwerty_up" layout="@layout/softkey_qwerty_label_character_label_footer_uiv3"' in zh
-          en = Path('verify-decoded/res/xml/softkeys_input_en_qwerty.xml').read_text(encoding='utf-8')
-          assert 'softkey_template_en_qwerty" layout="@layout/softkey_qwerty_label_character_label_footer_lower32"' in en
-          assert 'softkey_template_en_qwerty_up" layout="@layout/softkey_qwerty_label_character_label_footer_uiv3"' in en
+          preview = Path('verify-decoded/res/layout/popup_bubble_keypreview_material.xml').read_text(encoding='utf-8')
+          assert 'android:layout_width="78.0dip"' in preview
+          assert 'android:layout_height="104.0dip"' in preview
+          assert 'android:background="@drawable/bg_key_preview_ios"' in preview
+          assert 'app:CoversSoftKey="true"' in preview
+          assert 'app:PopupDistance="0.0dip"' in preview
+          bg = Path('verify-decoded/res/drawable-nodpi/bg_key_preview_ios.png')
+          assert bg.exists() and bg.stat().st_size > 1000
           dims = Path('verify-decoded/res/values/dimens.xml').read_text(encoding='utf-8')
           assert '<dimen name="text_size_candidate">25.0dip</dimen>' in dims
-          popup = Path('verify-decoded/res/layout/popup_bubble_keypreview_material.xml').read_text(encoding='utf-8')
-          assert 'android:textSize="36.5dip"' in popup and 'android:minWidth="56.0dip"' in popup
-          print('UI v3.2 final verification passed.')
+          print('UI v3.3 final verification passed.')
           PY
 
       - name: Build notes
         shell: bash
         run: |
           cat > BUILD-NOTES.txt <<'EOF'
-          Google Pinyin Input 4.5.2 UI v3.2 test
+          Google Pinyin Input 4.5.2 UI v3.3 test
           - Default keyboard height: 135% of old Tall/High baseline (1.485 actual ratio).
           - Lowercase QWERTY: 32dp portrait / 28dp landscape.
           - Uppercase QWERTY: 29dp portrait / 25dp landscape.
-          - Chinese and English both use separate lowercase/uppercase sizing.
           - Candidate words: 25dp.
-          - Key press preview: 36.5dp; minimum width 56dp.
+          - Key press preview now uses an iPhone-style wide rounded cap with a narrow tapered stem attached to the pressed key.
+          - Preview bubble: 78x104dp; preview text remains 36.5dp.
           - Settings toolbar shortcut retained.
           - Voice IME package restriction remains removed.
-          - Planned clipboard history is persistent by default: no automatic expiry; entries remain until user deletes/clears them. Pinning is for ordering/protection, not expiration.
+          - Planned clipboard history remains persistent by default, with no automatic expiration.
           EOF
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: google-pinyin-4.5.2-ui-v32
+          name: google-pinyin-4.5.2-ui-v33
           retention-days: 7
           if-no-files-found: error
           path: |
-            google-pinyin-4.5.2-ui-v32.apk
+            google-pinyin-4.5.2-ui-v33.apk
             BUILD-NOTES.txt
             original-sha256.txt
             modified-sha256.txt
