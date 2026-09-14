@@ -1,0 +1,119 @@
+name: google-pinyin-height
+
+on:
+  push:
+    branches:
+      - tmp/google-pinyin-height
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Google Pinyin 4.5.2 arm64 APK
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl -L --fail --retry 3 --retry-delay 2 \
+            -A 'Mozilla/5.0' \
+            'https://d.apkpure.net/b/APK/com.google.android.inputmethod.pinyin?versionCode=4520313' \
+            -o google-pinyin.apk
+          ls -lh google-pinyin.apk
+          file google-pinyin.apk
+          unzip -t google-pinyin.apk >/dev/null
+          echo 'APK_SHA256:'
+          sha256sum google-pinyin.apk
+
+      - name: Install apktool and JADX
+        shell: bash
+        run: |
+          set -euxo pipefail
+          APKTOOL_URL=$(curl -fsSL https://api.github.com/repos/iBotPeaches/Apktool/releases/latest \
+            | jq -r '.assets[] | select(.name | test("^apktool_[0-9].*\\.jar$")) | .browser_download_url' \
+            | head -n1)
+          test -n "$APKTOOL_URL"
+          curl -L --fail "$APKTOOL_URL" -o apktool.jar
+
+          JADX_URL=$(curl -fsSL https://api.github.com/repos/skylot/jadx/releases/latest \
+            | jq -r '.assets[] | select(.name | test("^jadx-.*\\.zip$")) | .browser_download_url' \
+            | head -n1)
+          test -n "$JADX_URL"
+          curl -L --fail "$JADX_URL" -o jadx.zip
+          unzip -q jadx.zip -d jadx-bin
+
+      - name: Decode APK
+        shell: bash
+        run: |
+          set -euxo pipefail
+          java -jar apktool.jar d -f google-pinyin.apk -o decoded
+          ./jadx-bin/bin/jadx --no-res -d jadx-out google-pinyin.apk || true
+
+      - name: Locate keyboard height implementation
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p inspect
+
+          echo '=== RESOURCE / SMALI MATCHES ===' | tee inspect/height-matches.txt
+          grep -RniE \
+            'keyboard[_. -]*height|height[_. -]*keyboard|key[_. -]*height|height[_. -]*key|height[_. -]*(scale|level|size)|keyboard[_. -]*(scale|size)|extra[_. -]*(tall|high)|tall|compact|resize' \
+            decoded/res decoded/smali* 2>/dev/null \
+            | head -n 3000 | tee -a inspect/height-matches.txt || true
+
+          echo '=== JAVA MATCHES ===' | tee inspect/java-height-matches.txt
+          grep -RniE \
+            'keyboard[_. -]*height|height[_. -]*keyboard|key[_. -]*height|height[_. -]*key|height[_. -]*(scale|level|size)|keyboard[_. -]*(scale|size)|extra[_. -]*(tall|high)|tall|compact|resize' \
+            jadx-out/sources 2>/dev/null \
+            | head -n 3000 | tee -a inspect/java-height-matches.txt || true
+
+          echo '=== CHINESE HEIGHT LABEL MATCHES ===' | tee inspect/chinese-matches.txt
+          grep -RniE \
+            '键盘高度|按键高度|超高|较高|很高|最高|高度|低|中|高|小|大' \
+            decoded/res/values* 2>/dev/null \
+            | head -n 3000 | tee -a inspect/chinese-matches.txt || true
+
+          echo '=== PREFERENCE XML CANDIDATES ===' | tee inspect/preferences.txt
+          grep -RniE \
+            'ListPreference|SeekBarPreference|Preference.*(height|size)|entryValues|entries' \
+            decoded/res/xml decoded/res/values* 2>/dev/null \
+            | head -n 3000 | tee -a inspect/preferences.txt || true
+
+          echo '=== DIMEN/ARRAY/INTEGER CANDIDATES ===' | tee inspect/numeric-resources.txt
+          grep -RniE \
+            'height|keyboard|key_|key\b|scale|size' \
+            decoded/res/values*/arrays.xml decoded/res/values*/dimens.xml decoded/res/values*/integers.xml decoded/res/values*/fractions.xml 2>/dev/null \
+            | head -n 5000 | tee -a inspect/numeric-resources.txt || true
+
+          echo '=== HEIGHT-RELATED RESOURCE FILES ===' | tee inspect/resource-files.txt
+          find decoded/res -type f -print | grep -Ei 'height|keyboard|key|setting|pref' \
+            | head -n 3000 | tee -a inspect/resource-files.txt || true
+
+          echo '=== SUMMARY COUNTS ==='
+          wc -l inspect/*.txt
+
+      - name: Print targeted matches
+        shell: bash
+        run: |
+          for f in inspect/*.txt; do
+            echo "===== $f ====="
+            sed -n '1,1200p' "$f"
+          done
+
+      - name: Upload inspection artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pinyin-height-inspect
+          if-no-files-found: error
+          retention-days: 2
+          path: |
+            inspect
+            decoded/AndroidManifest.xml
+            decoded/res/values*/arrays.xml
+            decoded/res/values*/dimens.xml
+            decoded/res/values*/integers.xml
+            decoded/res/values*/strings.xml
+            decoded/res/xml
