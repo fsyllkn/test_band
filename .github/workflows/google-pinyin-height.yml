@@ -25,13 +25,15 @@ jobs:
           unzip -t google-pinyin.apk >/dev/null
           sha256sum google-pinyin.apk | tee original-sha256.txt
 
-      - name: Decode and patch only keyboard height arrays
+      - name: Decode and patch keyboard height plus Chinese lowercase size
         shell: bash
         run: |
           set -euxo pipefail
           java -jar apktool.jar d -f google-pinyin.apk -o decoded
           python3 - <<'PY'
           from pathlib import Path
+
+          # 1) Keep the height extension from the previous test build.
           p = Path('decoded/res/values/arrays.xml')
           s = p.read_text(encoding='utf-8')
 
@@ -66,13 +68,13 @@ jobs:
                   <item>1.705</item>
               </string-array>'''
 
-          def repl(text, name, replacement):
+          def repl_array(text, name, replacement):
               a = text.index(f'    <string-array name="{name}">')
               b = text.index('    </string-array>', a) + len('    </string-array>')
               return text[:a] + replacement + text[b:]
 
-          s = repl(s, 'entries_keyboard_height_ratio', entries)
-          s = repl(s, 'entryvalues_keyboard_height_ratio', values)
+          s = repl_array(s, 'entries_keyboard_height_ratio', entries)
+          s = repl_array(s, 'entryvalues_keyboard_height_ratio', values)
           p.write_text(s, encoding='utf-8')
 
           q = Path('decoded/res/values-zh/strings.xml')
@@ -80,63 +82,118 @@ jobs:
               t = q.read_text(encoding='utf-8')
               t = t.replace('<string name="kb_height_tall">高</string>', '<string name="kb_height_tall">高（100%）</string>')
               q.write_text(t, encoding='utf-8')
+
+          # 2) Create a dedicated layout for lowercase Chinese Pinyin QWERTY only.
+          # Original lowercase and uppercase share the same layout/style. On phones
+          # around sw350dp the resolved QWERTY size is 23dp. Lowercase Latin glyphs
+          # have a smaller x-height, so enlarge only the lowercase primary label.
+          src = Path('decoded/res/layout/softkey_qwerty_label_character_label_footer.xml')
+          dst = Path('decoded/res/layout/softkey_qwerty_label_character_label_footer_lowercase.xml')
+          x = src.read_text(encoding='utf-8')
+          needle = 'android:id="@id/label" enable_relayout="false" style="@style/Label.Qwerty"'
+          replacement = 'android:id="@id/label" android:textSize="27.0dip" enable_relayout="false" style="@style/Label.Qwerty"'
+          if needle not in x:
+              raise SystemExit('Portrait QWERTY label layout pattern not found')
+          dst.write_text(x.replace(needle, replacement, 1), encoding='utf-8')
+
+          src_land = Path('decoded/res/layout-land/softkey_qwerty_label_character_label_footer.xml')
+          dst_land = Path('decoded/res/layout-land/softkey_qwerty_label_character_label_footer_lowercase.xml')
+          xl = src_land.read_text(encoding='utf-8')
+          needle_land = 'android:id="@id/label" style="@style/Label.QwertyLand"'
+          replacement_land = 'android:id="@id/label" android:textSize="23.0dip" style="@style/Label.QwertyLand"'
+          if needle_land not in xl:
+              raise SystemExit('Landscape QWERTY label layout pattern not found')
+          dst_land.write_text(xl.replace(needle_land, replacement_land, 1), encoding='utf-8')
+
+          # Point only the LOWERCASE Chinese Pinyin template to the larger layout.
+          soft = Path('decoded/res/xml/softkeys_input_zh_pinyin_qwerty.xml')
+          sx = soft.read_text(encoding='utf-8')
+          old = '<softkey_template id="@id/softkey_template_pinyin_qwerty" layout="@layout/softkey_qwerty_label_character_label_footer"'
+          new = '<softkey_template id="@id/softkey_template_pinyin_qwerty" layout="@layout/softkey_qwerty_label_character_label_footer_lowercase"'
+          if sx.count(old) != 1:
+              raise SystemExit(f'Lowercase template match count={sx.count(old)}')
+          sx = sx.replace(old, new, 1)
+          soft.write_text(sx, encoding='utf-8')
+
+          # Uppercase template must remain unchanged.
+          assert 'id="@id/softkey_template_pinyin_qwerty_up" layout="@layout/softkey_qwerty_label_character_label_footer"' in sx
+          print('Chinese lowercase QWERTY primary label: portrait 27dp, landscape 23dp')
+          print('Uppercase Chinese QWERTY layout left unchanged.')
           PY
 
       - name: Rebuild with legacy AAPT1
         shell: bash
         run: |
           set -euxo pipefail
-          java -jar apktool.jar b --use-aapt1 decoded -o google-pinyin-height-unsigned.apk
+          java -jar apktool.jar b --use-aapt1 decoded -o google-pinyin-height-font-unsigned.apk
 
       - name: Align, sign and verify
         shell: bash
         run: |
           set -euxo pipefail
           BUILD_TOOLS=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n1)
-          "$BUILD_TOOLS/zipalign" -f -p 4 google-pinyin-height-unsigned.apk google-pinyin-height-aligned.apk
-          keytool -genkeypair -noprompt -keystore height-mod.jks -storepass android -keypass android \
-            -alias heightmod -keyalg RSA -keysize 2048 -validity 10000 \
-            -dname 'CN=Google Pinyin Height Mod, OU=Local Build, O=Local Build, L=Local, S=Local, C=US'
-          "$BUILD_TOOLS/apksigner" sign --ks height-mod.jks --ks-key-alias heightmod \
+          "$BUILD_TOOLS/zipalign" -f -p 4 google-pinyin-height-font-unsigned.apk google-pinyin-height-font-aligned.apk
+          keytool -genkeypair -noprompt -keystore height-font-mod.jks -storepass android -keypass android \
+            -alias heightfontmod -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname 'CN=Google Pinyin Height Font Mod, OU=Local Build, O=Local Build, L=Local, S=Local, C=US'
+          "$BUILD_TOOLS/apksigner" sign --ks height-font-mod.jks --ks-key-alias heightfontmod \
             --ks-pass pass:android --key-pass pass:android \
-            --out google-pinyin-4.5.2-height-presets.apk google-pinyin-height-aligned.apk
-          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs google-pinyin-4.5.2-height-presets.apk | tee signature.txt
-          "$BUILD_TOOLS/aapt" dump badging google-pinyin-4.5.2-height-presets.apk | head -n 25 | tee badging.txt
-          sha256sum google-pinyin-4.5.2-height-presets.apk | tee modified-sha256.txt
+            --out google-pinyin-4.5.2-height-lowercase27.apk google-pinyin-height-font-aligned.apk
+          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs google-pinyin-4.5.2-height-lowercase27.apk | tee signature.txt
+          "$BUILD_TOOLS/aapt" dump badging google-pinyin-4.5.2-height-lowercase27.apk | head -n 25 | tee badging.txt
+          sha256sum google-pinyin-4.5.2-height-lowercase27.apk | tee modified-sha256.txt
 
-      - name: Re-decode final APK and verify height values
+      - name: Re-decode final APK and verify changes
         shell: bash
         run: |
           set -euxo pipefail
-          java -jar apktool.jar d -f google-pinyin-4.5.2-height-presets.apk -o verify-decoded
+          java -jar apktool.jar d -f google-pinyin-4.5.2-height-lowercase27.apk -o verify-decoded
           python3 - <<'PY'
           from pathlib import Path
-          s = Path('verify-decoded/res/values/arrays.xml').read_text(encoding='utf-8')
-          expected = ['<item>120%</item>', '<item>125%</item>', '<item>130%</item>', '<item>135%</item>', '<item>140%</item>', '<item>145%</item>', '<item>150%</item>', '<item>155%</item>', '<item>1.32</item>', '<item>1.375</item>', '<item>1.43</item>', '<item>1.485</item>', '<item>1.54</item>', '<item>1.595</item>', '<item>1.65</item>', '<item>1.705</item>']
-          missing = [x for x in expected if x not in s]
+          a = Path('verify-decoded/res/values/arrays.xml').read_text(encoding='utf-8')
+          expected = ['<item>120%</item>', '<item>155%</item>', '<item>1.32</item>', '<item>1.705</item>']
+          missing = [x for x in expected if x not in a]
           assert not missing, missing
-          print('All added height presets verified in final APK.')
+
+          s = Path('verify-decoded/res/xml/softkeys_input_zh_pinyin_qwerty.xml').read_text(encoding='utf-8')
+          assert 'id="@id/softkey_template_pinyin_qwerty" layout="@layout/softkey_qwerty_label_character_label_footer_lowercase"' in s
+          assert 'id="@id/softkey_template_pinyin_qwerty_up" layout="@layout/softkey_qwerty_label_character_label_footer"' in s
+
+          lp = Path('verify-decoded/res/layout/softkey_qwerty_label_character_label_footer_lowercase.xml').read_text(encoding='utf-8')
+          ll = Path('verify-decoded/res/layout-land/softkey_qwerty_label_character_label_footer_lowercase.xml').read_text(encoding='utf-8')
+          assert 'android:textSize="27.0dip"' in lp
+          assert 'android:textSize="23.0dip"' in ll
+          print('Verified: height presets preserved; Chinese lowercase QWERTY enlarged; uppercase unchanged.')
           PY
 
       - name: Build notes
         shell: bash
         run: |
           cat > BUILD-NOTES.txt <<'EOF'
-          Google Pinyin Input 4.5.2.193126728 height preset mod
-          Legacy Tall (1.10) is treated as 100%.
-          Added: 120%=1.320, 125%=1.375, 130%=1.430, 135%=1.485,
-                 140%=1.540, 145%=1.595, 150%=1.650, 155%=1.705.
-          Re-signed with a local build key; it cannot update the official Google-signed APK in place.
+          Google Pinyin Input 4.5.2.193126728 test mod
+
+          Preserved height extension:
+          Legacy Tall (1.10) = 100%; added 120% through 155%.
+
+          New change:
+          Chinese Pinyin full QWERTY LOWERCASE primary letters only:
+          - portrait: 27dp
+          - landscape: 23dp
+          Uppercase QWERTY remains on the original layout and original size.
+          Footer numbers/symbols, key dimensions and English keyboard are unchanged.
+
+          This test APK is re-signed with a new local key and therefore cannot update
+          either the official Google-signed APK or the previous test build in place.
           EOF
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: google-pinyin-4.5.2-height-presets
+          name: google-pinyin-4.5.2-height-lowercase27
           retention-days: 7
           if-no-files-found: error
           path: |
-            google-pinyin-4.5.2-height-presets.apk
+            google-pinyin-4.5.2-height-lowercase27.apk
             BUILD-NOTES.txt
             original-sha256.txt
             modified-sha256.txt
