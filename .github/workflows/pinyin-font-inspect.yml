@@ -22,13 +22,62 @@ jobs:
             'https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar' \
             -o apktool.jar
           java -jar apktool.jar d -f google-pinyin.apk -o decoded
-      - name: Inspect qwerty label layouts and references
+
+      - name: Inspect English and Chinese QWERTY layouts
         shell: bash
         run: |
-          set -euxo pipefail
-          echo '=== main layout ==='
-          find decoded/res -type f -name 'softkey_qwerty_label_character_label_footer.xml' -print -exec sed -n '1,220p' {} \;
-          echo '=== qwerty text-size dimensions ==='
-          grep -RniE 'text_size_qwerty_label|softkey_qwerty_label_character_label_footer|textSize|text_size_big|text_size_huge' decoded/res/values* decoded/res/layout* decoded/res/xml/softkeys_input_en_qwerty.xml decoded/res/xml/softkeys_input_zh_pinyin_qwerty.xml | head -n 500
-          echo '=== Chinese pinyin softkeys ==='
-          sed -n '1,180p' decoded/res/xml/softkeys_input_zh_pinyin_qwerty.xml
+          set -uo pipefail
+          echo '=== ENGLISH QWERTY XML ==='
+          sed -n '1,220p' decoded/res/xml/softkeys_input_en_qwerty.xml || true
+          echo '=== CHINESE QWERTY XML ==='
+          sed -n '1,220p' decoded/res/xml/softkeys_input_zh_pinyin_qwerty.xml || true
+          echo '=== QWERTY LABEL LAYOUTS ==='
+          find decoded/res -type f -name 'softkey_qwerty_label_character_label_footer.xml' -print -exec sed -n '1,180p' {} \; || true
+
+      - name: Inspect candidate text sizes
+        shell: bash
+        run: |
+          set -uo pipefail
+          echo '=== candidate resource names ==='
+          grep -RniE 'candidate|suggestion|composing|completion' decoded/res/values* decoded/res/layout* decoded/res/xml 2>/dev/null \
+            | grep -Ei 'textSize|text_size|dimen|style|layout|candidate|suggestion' \
+            | head -n 1800 || true
+          echo '=== candidate layouts ==='
+          find decoded/res -type f | grep -Ei '/(layout|xml).*(candidate|suggest)' | sort | head -n 250 || true
+          for f in $(find decoded/res -type f | grep -Ei '/layout[^/]*/.*(candidate|suggest).*\.xml$' | head -n 80); do
+            echo "===== $f ====="; sed -n '1,220p' "$f"; done
+
+      - name: Inspect key preview popup resources
+        shell: bash
+        run: |
+          set -uo pipefail
+          echo '=== popup / preview matches ==='
+          grep -RniE 'preview|popup|key_preview|softkey_preview|popup.*key|key.*popup' decoded/res decoded/smali* 2>/dev/null | head -n 2200 || true
+          echo '=== popup resource files ==='
+          find decoded/res -type f | grep -Ei '(preview|popup)' | sort | head -n 500 || true
+          for f in $(find decoded/res -type f | grep -Ei '/layout[^/]*/.*(preview|popup).*\.xml$' | head -n 100); do
+            echo "===== $f ====="; sed -n '1,260p' "$f"; done
+
+      - name: Inspect toolbar and clipboard hooks
+        shell: bash
+        run: |
+          set -uo pipefail
+          echo '=== toolbar/dashboard/action matches ==='
+          grep -RniE 'toolbar|dashboard|clipboard|clip(board)?|settings|preference|action.*setting|setting.*action|menu_' decoded/res decoded/smali* 2>/dev/null | head -n 4000 || true
+          echo '=== likely toolbar layouts/xml ==='
+          find decoded/res -type f | grep -Ei '(toolbar|dashboard|menu|extension|function)' | sort | head -n 700 || true
+          for f in decoded/res/xml/ime_dashboard.xml decoded/res/xml/extension_text_editing.xml decoded/res/xml/softkeys_function.xml; do
+            if [ -f "$f" ]; then echo "===== $f ====="; sed -n '1,280p' "$f"; fi
+          done
+
+      - name: Upload focused decoded resources
+        uses: actions/upload-artifact@v4
+        with:
+          name: pinyin-ui-inspect
+          retention-days: 2
+          path: |
+            decoded/res/values*/dimens.xml
+            decoded/res/values*/styles.xml
+            decoded/res/layout*
+            decoded/res/xml
+            decoded/smali*
