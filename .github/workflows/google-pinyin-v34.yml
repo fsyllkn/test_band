@@ -1,0 +1,56 @@
+name: google-pinyin-v34
+
+on:
+  push:
+    branches: [tmp/google-pinyin-height]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl -L --fail --retry 3 -A 'Mozilla/5.0' 'https://d.apkpure.net/b/APK/com.google.android.inputmethod.pinyin?versionCode=4520313' -o google-pinyin.apk
+          curl -L --fail 'https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar' -o apktool.jar
+          unzip -t google-pinyin.apk >/dev/null
+      - name: Decode and patch
+        shell: bash
+        run: |
+          set -euxo pipefail
+          java -jar apktool.jar d -f google-pinyin.apk -o decoded
+          python3 scripts/patch_google_pinyin_ui_v34.py
+      - name: Rebuild
+        shell: bash
+        run: |
+          set -euxo pipefail
+          java -jar apktool.jar b --use-aapt1 decoded -o app-unsigned.apk
+      - name: Sign
+        shell: bash
+        run: |
+          set -euxo pipefail
+          BUILD_TOOLS=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n1)
+          "$BUILD_TOOLS/zipalign" -f -p 4 app-unsigned.apk app-aligned.apk
+          keytool -genkeypair -noprompt -keystore test.jks -storepass android -keypass android -alias test -keyalg RSA -keysize 2048 -validity 10000 -dname 'CN=Pinyin UI V3.4,O=Local,C=US'
+          "$BUILD_TOOLS/apksigner" sign --ks test.jks --ks-key-alias test --ks-pass pass:android --key-pass pass:android --out google-pinyin-4.5.2-ui-v34.apk app-aligned.apk
+          "$BUILD_TOOLS/apksigner" verify --verbose google-pinyin-4.5.2-ui-v34.apk
+          sha256sum google-pinyin-4.5.2-ui-v34.apk | tee SHA256SUMS.txt
+      - name: Verify
+        shell: bash
+        run: |
+          set -euxo pipefail
+          java -jar apktool.jar d -f google-pinyin-4.5.2-ui-v34.apk -o verify-decoded
+          grep -R 'android:textSize="42.0dip"' verify-decoded/res/layout/popup_bubble_keypreview_material.xml
+          grep -R 'pref_def_value_keyboard_height_ratio">1.485<' verify-decoded/res/values*/strings.xml
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: google-pinyin-4.5.2-ui-v34
+          retention-days: 7
+          path: |
+            google-pinyin-4.5.2-ui-v34.apk
+            SHA256SUMS.txt
