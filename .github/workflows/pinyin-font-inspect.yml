@@ -1,0 +1,34 @@
+name: pinyin-font-inspect
+
+on:
+  push:
+    branches: [tmp/google-pinyin-height]
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download APK and apktool
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl -L --fail --retry 3 -A 'Mozilla/5.0' \
+            'https://d.apkpure.net/b/APK/com.google.android.inputmethod.pinyin?versionCode=4520313' \
+            -o google-pinyin.apk
+          curl -L --fail \
+            'https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar' \
+            -o apktool.jar
+          java -jar apktool.jar d -f google-pinyin.apk -o decoded
+      - name: Inspect qwerty label layouts and references
+        shell: bash
+        run: |
+          set -euxo pipefail
+          echo '=== main layout ==='
+          find decoded/res -type f -name 'softkey_qwerty_label_character_label_footer.xml' -print -exec sed -n '1,220p' {} \;
+          echo '=== qwerty text-size dimensions ==='
+          grep -RniE 'text_size_qwerty_label|softkey_qwerty_label_character_label_footer|textSize|text_size_big|text_size_huge' decoded/res/values* decoded/res/layout* decoded/res/xml/softkeys_input_en_qwerty.xml decoded/res/xml/softkeys_input_zh_pinyin_qwerty.xml | head -n 500
+          echo '=== Chinese pinyin softkeys ==='
+          sed -n '1,180p' decoded/res/xml/softkeys_input_zh_pinyin_qwerty.xml
