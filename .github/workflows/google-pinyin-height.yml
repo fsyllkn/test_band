@@ -25,7 +25,7 @@ jobs:
           unzip -t google-pinyin.apk >/dev/null
           sha256sum google-pinyin.apk | tee original-sha256.txt
 
-      - name: Decode and patch keyboard height plus Chinese lowercase size
+      - name: Decode and apply UI patches
         shell: bash
         run: |
           set -euxo pipefail
@@ -33,10 +33,15 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
 
-          # 1) Keep the height extension from the previous test build.
+          def replace_once(text, old, new, label):
+              n = text.count(old)
+              if n != 1:
+                  raise SystemExit(f'{label}: expected 1 match, got {n}')
+              return text.replace(old, new, 1)
+
+          # 1) Preserve keyboard-height presets. Original Tall (1.10) is our 100%.
           p = Path('decoded/res/values/arrays.xml')
           s = p.read_text(encoding='utf-8')
-
           entries = '''    <string-array name="entries_keyboard_height_ratio">
                   <item>@string/kb_height_short</item>
                   <item>@string/kb_height_midshort</item>
@@ -83,117 +88,211 @@ jobs:
               t = t.replace('<string name="kb_height_tall">高</string>', '<string name="kb_height_tall">高（100%）</string>')
               q.write_text(t, encoding='utf-8')
 
-          # 2) Create a dedicated layout for lowercase Chinese Pinyin QWERTY only.
-          # Original lowercase and uppercase share the same layout/style. On phones
-          # around sw350dp the resolved QWERTY size is 23dp. Lowercase Latin glyphs
-          # have a smaller x-height, so enlarge only the lowercase primary label.
+          # 2) Chinese + English LOWERCASE QWERTY: 29dp portrait.
+          # Uppercase remains on the stock layout/size.
           src = Path('decoded/res/layout/softkey_qwerty_label_character_label_footer.xml')
           dst = Path('decoded/res/layout/softkey_qwerty_label_character_label_footer_lowercase.xml')
           x = src.read_text(encoding='utf-8')
-          needle = 'android:id="@id/label" enable_relayout="false" style="@style/Label.Qwerty"'
-          replacement = 'android:id="@id/label" android:textSize="27.0dip" enable_relayout="false" style="@style/Label.Qwerty"'
-          if needle not in x:
-              raise SystemExit('Portrait QWERTY label layout pattern not found')
-          dst.write_text(x.replace(needle, replacement, 1), encoding='utf-8')
+          x = replace_once(
+              x,
+              'android:id="@id/label" enable_relayout="false" style="@style/Label.Qwerty"',
+              'android:id="@id/label" android:textSize="29.0dip" enable_relayout="false" style="@style/Label.Qwerty"',
+              'portrait lowercase label')
+          dst.write_text(x, encoding='utf-8')
 
           src_land = Path('decoded/res/layout-land/softkey_qwerty_label_character_label_footer.xml')
           dst_land = Path('decoded/res/layout-land/softkey_qwerty_label_character_label_footer_lowercase.xml')
           xl = src_land.read_text(encoding='utf-8')
-          needle_land = 'android:id="@id/label" style="@style/Label.QwertyLand"'
-          replacement_land = 'android:id="@id/label" android:textSize="23.0dip" style="@style/Label.QwertyLand"'
-          if needle_land not in xl:
-              raise SystemExit('Landscape QWERTY label layout pattern not found')
-          dst_land.write_text(xl.replace(needle_land, replacement_land, 1), encoding='utf-8')
+          xl = replace_once(
+              xl,
+              'android:id="@id/label" style="@style/Label.QwertyLand"',
+              'android:id="@id/label" android:textSize="25.0dip" style="@style/Label.QwertyLand"',
+              'landscape lowercase label')
+          dst_land.write_text(xl, encoding='utf-8')
 
-          # Point only the LOWERCASE Chinese Pinyin template to the larger layout.
-          soft = Path('decoded/res/xml/softkeys_input_zh_pinyin_qwerty.xml')
-          sx = soft.read_text(encoding='utf-8')
-          old = '<softkey_template id="@id/softkey_template_pinyin_qwerty" layout="@layout/softkey_qwerty_label_character_label_footer"'
-          new = '<softkey_template id="@id/softkey_template_pinyin_qwerty" layout="@layout/softkey_qwerty_label_character_label_footer_lowercase"'
-          if sx.count(old) != 1:
-              raise SystemExit(f'Lowercase template match count={sx.count(old)}')
-          sx = sx.replace(old, new, 1)
-          soft.write_text(sx, encoding='utf-8')
+          for rel, template in [
+              ('softkeys_input_zh_pinyin_qwerty.xml', 'softkey_template_pinyin_qwerty'),
+              ('softkeys_input_en_qwerty.xml', 'softkey_template_en_qwerty'),
+          ]:
+              f = Path('decoded/res/xml') / rel
+              sx = f.read_text(encoding='utf-8')
+              old = f'id="@id/{template}" layout="@layout/softkey_qwerty_label_character_label_footer"'
+              new = f'id="@id/{template}" layout="@layout/softkey_qwerty_label_character_label_footer_lowercase"'
+              sx = replace_once(sx, old, new, f'{rel} lowercase template')
+              f.write_text(sx, encoding='utf-8')
 
-          # Uppercase template must remain unchanged.
-          assert 'id="@id/softkey_template_pinyin_qwerty_up" layout="@layout/softkey_qwerty_label_character_label_footer"' in sx
-          print('Chinese lowercase QWERTY primary label: portrait 27dp, landscape 23dp')
-          print('Uppercase Chinese QWERTY layout left unchanged.')
+          # 3) Candidate words: 21dp -> 25dp on phones.
+          d = Path('decoded/res/values/dimens.xml')
+          ds = d.read_text(encoding='utf-8')
+          ds = replace_once(
+              ds,
+              '<dimen name="text_size_candidate">21.0dip</dimen>',
+              '<dimen name="text_size_candidate">25.0dip</dimen>',
+              'candidate text size')
+          d.write_text(ds, encoding='utf-8')
+
+          # 4) QWERTY key preview: +30% text and a wider Apple-like cap.
+          # Stock: text_size_huge 28dp, sw350 popup width 42dp.
+          # New dedicated layout affects PRESS previews only, leaving long-press menus alone.
+          popup_src = Path('decoded/res/layout/popup_bubble_material.xml')
+          popup_dst = Path('decoded/res/layout/popup_bubble_keypreview_material.xml')
+          px = popup_src.read_text(encoding='utf-8')
+          px = replace_once(
+              px,
+              '<FrameLayout android:id="@id/popup_layout" style="@style/MaterialPopupView">',
+              '<FrameLayout android:id="@id/popup_layout" android:minWidth="56.0dip" style="@style/MaterialPopupView">',
+              'preview frame width')
+          px = replace_once(
+              px,
+              '<com.google.android.apps.inputmethod.libs.framework.keyboard.widget.AutoCenteredLabelView android:id="@id/popup_label" android:visibility="gone" style="@style/MaterialPopupLabel" />',
+              '<com.google.android.apps.inputmethod.libs.framework.keyboard.widget.AutoCenteredLabelView android:id="@id/popup_label" android:textSize="36.5dip" android:minWidth="56.0dip" android:visibility="gone" style="@style/MaterialPopupLabel" />',
+              'preview label size')
+          popup_dst.write_text(px, encoding='utf-8')
+
+          for rel in ['softkeys_input_zh_pinyin_qwerty.xml', 'softkeys_input_en_qwerty.xml']:
+              f = Path('decoded/res/xml') / rel
+              sx = f.read_text(encoding='utf-8')
+              # Both lowercase and uppercase templates have PRESS actions. Add the dedicated
+              # preview only to PRESS actions; long-press popup arrays remain stock.
+              needle = 'intention="DECODE" popup_label="$press_data$" />'
+              repl = 'intention="DECODE" popup_label="$press_data$" popup_layout="@layout/popup_bubble_keypreview_material" />'
+              count = sx.count(needle)
+              if count not in (1, 2):
+                  raise SystemExit(f'{rel}: unexpected PRESS preview count {count}')
+              sx = sx.replace(needle, repl)
+              f.write_text(sx, encoding='utf-8')
+
+          # 5) Add Settings + Clipboard/Edit shortcuts to the prime toolbar.
+          # Google Pinyin 4.5.2 has no clipboard-history manager. The second shortcut opens
+          # its built-in TextEditingExtension, which provides Select/Copy/Cut/Paste.
+          header_layout = Path('decoded/res/layout/keyboard_prime_header_inner.xml')
+          hs = header_layout.read_text(encoding='utf-8')
+          old_right = '''    <LinearLayout android:gravity="right" android:paddingRight="?KeyboardInnerPadding" style="@style/PrimeHeaderInnerLinear">
+                  <com.google.android.apps.inputmethod.libs.framework.keyboard.SoftKeyView android:id="@id/key_pos_header_voice" style="@style/HeaderTab.PrimeIcon" />
+              </LinearLayout>'''
+          new_right = '''    <LinearLayout android:gravity="right" android:paddingRight="?KeyboardInnerPadding" style="@style/PrimeHeaderInnerLinear">
+                  <com.google.android.apps.inputmethod.libs.framework.keyboard.SoftKeyView android:id="@+id/key_pos_header_clipboard" style="@style/HeaderTab.PrimeIcon" />
+                  <com.google.android.apps.inputmethod.libs.framework.keyboard.SoftKeyView android:id="@+id/key_pos_header_settings" style="@style/HeaderTab.PrimeIcon" />
+                  <com.google.android.apps.inputmethod.libs.framework.keyboard.SoftKeyView android:id="@id/key_pos_header_voice" style="@style/HeaderTab.PrimeIcon" />
+              </LinearLayout>'''
+          hs = replace_once(hs, old_right, new_right, 'prime header right toolbar')
+          header_layout.write_text(hs, encoding='utf-8')
+
+          plain = Path('decoded/res/xml/softkeys_header_plain.xml')
+          ps = plain.read_text(encoding='utf-8')
+          insert_before = '    </softkeys>\n</framework>'
+          clipboard_softkey = '''        <softkey id="@+id/softkey_clipboard_edit" layout="@layout/softkey_icon" content_description="@string/text_editing_access_point_content_desc">
+                  <action type="PRESS" keycode="OPEN_EXTENSION" data="com.google.android.apps.inputmethod.libs.textediting.TextEditingExtension" />
+                  <icon location="@id/icon" value="@attr/IconAccessPointTextEditing" />
+              </softkey>
+          '''
+          if insert_before not in ps:
+              raise SystemExit('softkeys_header_plain insertion point missing')
+          ps = ps.replace(insert_before, clipboard_softkey + insert_before, 1)
+          plain.write_text(ps, encoding='utf-8')
+
+          for rel in ['keymapping_header_zh_cn_prime.xml', 'keymapping_header_en_prime.xml']:
+              f = Path('decoded/res/xml') / rel
+              ms = f.read_text(encoding='utf-8')
+              marker = '        <mapping view_id="@id/key_pos_header_voice" key_id="@id/softkey_voice" />'
+              addition = '''        <mapping view_id="@id/key_pos_header_clipboard" key_id="@id/softkey_clipboard_edit" />
+                  <mapping view_id="@id/key_pos_header_settings" key_id="@id/softkey_settings_key" />
+          '''
+              ms = replace_once(ms, marker, addition + marker, f'{rel} toolbar mappings')
+              f.write_text(ms, encoding='utf-8')
+
+          print('Patched: CN+EN lowercase 29dp, candidates 25dp, key preview 36.5dp/56dp, toolbar shortcuts.')
           PY
 
       - name: Rebuild with legacy AAPT1
         shell: bash
         run: |
           set -euxo pipefail
-          java -jar apktool.jar b --use-aapt1 decoded -o google-pinyin-height-font-unsigned.apk
+          java -jar apktool.jar b --use-aapt1 decoded -o google-pinyin-ui-v2-unsigned.apk
 
       - name: Align, sign and verify
         shell: bash
         run: |
           set -euxo pipefail
           BUILD_TOOLS=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n1)
-          "$BUILD_TOOLS/zipalign" -f -p 4 google-pinyin-height-font-unsigned.apk google-pinyin-height-font-aligned.apk
-          keytool -genkeypair -noprompt -keystore height-font-mod.jks -storepass android -keypass android \
-            -alias heightfontmod -keyalg RSA -keysize 2048 -validity 10000 \
-            -dname 'CN=Google Pinyin Height Font Mod, OU=Local Build, O=Local Build, L=Local, S=Local, C=US'
-          "$BUILD_TOOLS/apksigner" sign --ks height-font-mod.jks --ks-key-alias heightfontmod \
+          "$BUILD_TOOLS/zipalign" -f -p 4 google-pinyin-ui-v2-unsigned.apk google-pinyin-ui-v2-aligned.apk
+          keytool -genkeypair -noprompt -keystore ui-v2-mod.jks -storepass android -keypass android \
+            -alias uiv2mod -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname 'CN=Google Pinyin UI V2 Mod, OU=Local Build, O=Local Build, L=Local, S=Local, C=US'
+          "$BUILD_TOOLS/apksigner" sign --ks ui-v2-mod.jks --ks-key-alias uiv2mod \
             --ks-pass pass:android --key-pass pass:android \
-            --out google-pinyin-4.5.2-height-lowercase27.apk google-pinyin-height-font-aligned.apk
-          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs google-pinyin-4.5.2-height-lowercase27.apk | tee signature.txt
-          "$BUILD_TOOLS/aapt" dump badging google-pinyin-4.5.2-height-lowercase27.apk | head -n 25 | tee badging.txt
-          sha256sum google-pinyin-4.5.2-height-lowercase27.apk | tee modified-sha256.txt
+            --out google-pinyin-4.5.2-ui-v2.apk google-pinyin-ui-v2-aligned.apk
+          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs google-pinyin-4.5.2-ui-v2.apk | tee signature.txt
+          "$BUILD_TOOLS/aapt" dump badging google-pinyin-4.5.2-ui-v2.apk | head -n 25 | tee badging.txt
+          sha256sum google-pinyin-4.5.2-ui-v2.apk | tee modified-sha256.txt
 
       - name: Re-decode final APK and verify changes
         shell: bash
         run: |
           set -euxo pipefail
-          java -jar apktool.jar d -f google-pinyin-4.5.2-height-lowercase27.apk -o verify-decoded
+          java -jar apktool.jar d -f google-pinyin-4.5.2-ui-v2.apk -o verify-decoded
           python3 - <<'PY'
           from pathlib import Path
+
           a = Path('verify-decoded/res/values/arrays.xml').read_text(encoding='utf-8')
-          expected = ['<item>120%</item>', '<item>155%</item>', '<item>1.32</item>', '<item>1.705</item>']
-          missing = [x for x in expected if x not in a]
-          assert not missing, missing
+          for token in ['<item>120%</item>', '<item>155%</item>', '<item>1.32</item>', '<item>1.705</item>']:
+              assert token in a, token
 
-          s = Path('verify-decoded/res/xml/softkeys_input_zh_pinyin_qwerty.xml').read_text(encoding='utf-8')
-          assert 'id="@id/softkey_template_pinyin_qwerty" layout="@layout/softkey_qwerty_label_character_label_footer_lowercase"' in s
-          assert 'id="@id/softkey_template_pinyin_qwerty_up" layout="@layout/softkey_qwerty_label_character_label_footer"' in s
+          lower = Path('verify-decoded/res/layout/softkey_qwerty_label_character_label_footer_lowercase.xml').read_text(encoding='utf-8')
+          assert 'android:textSize="29.0dip"' in lower
 
-          lp = Path('verify-decoded/res/layout/softkey_qwerty_label_character_label_footer_lowercase.xml').read_text(encoding='utf-8')
-          ll = Path('verify-decoded/res/layout-land/softkey_qwerty_label_character_label_footer_lowercase.xml').read_text(encoding='utf-8')
-          assert 'android:textSize="27.0dip"' in lp
-          assert 'android:textSize="23.0dip"' in ll
-          print('Verified: height presets preserved; Chinese lowercase QWERTY enlarged; uppercase unchanged.')
+          en = Path('verify-decoded/res/xml/softkeys_input_en_qwerty.xml').read_text(encoding='utf-8')
+          zh = Path('verify-decoded/res/xml/softkeys_input_zh_pinyin_qwerty.xml').read_text(encoding='utf-8')
+          assert '@layout/softkey_qwerty_label_character_label_footer_lowercase' in en
+          assert '@layout/softkey_qwerty_label_character_label_footer_lowercase' in zh
+          assert '@layout/popup_bubble_keypreview_material' in en
+          assert '@layout/popup_bubble_keypreview_material' in zh
+
+          dims = Path('verify-decoded/res/values/dimens.xml').read_text(encoding='utf-8')
+          assert '<dimen name="text_size_candidate">25.0dip</dimen>' in dims
+
+          popup = Path('verify-decoded/res/layout/popup_bubble_keypreview_material.xml').read_text(encoding='utf-8')
+          assert 'android:textSize="36.5dip"' in popup
+          assert 'android:minWidth="56.0dip"' in popup
+
+          header = Path('verify-decoded/res/layout/keyboard_prime_header_inner.xml').read_text(encoding='utf-8')
+          assert 'key_pos_header_clipboard' in header
+          assert 'key_pos_header_settings' in header
+          print('Final APK resource verification passed.')
           PY
 
       - name: Build notes
         shell: bash
         run: |
           cat > BUILD-NOTES.txt <<'EOF'
-          Google Pinyin Input 4.5.2.193126728 test mod
+          Google Pinyin Input 4.5.2.193126728 UI v2 test mod
 
-          Preserved height extension:
-          Legacy Tall (1.10) = 100%; added 120% through 155%.
+          Preserved:
+          - Keyboard height presets: original Tall=100%, plus 120%-155%.
 
-          New change:
-          Chinese Pinyin full QWERTY LOWERCASE primary letters only:
-          - portrait: 27dp
-          - landscape: 23dp
-          Uppercase QWERTY remains on the original layout and original size.
-          Footer numbers/symbols, key dimensions and English keyboard are unchanged.
+          UI v2 changes:
+          - Chinese Pinyin lowercase QWERTY: 29dp portrait, 25dp landscape.
+          - English lowercase QWERTY: same enlarged lowercase layout.
+          - Uppercase QWERTY remains stock size.
+          - Candidate word text: 21dp -> 25dp on phones.
+          - QWERTY press-preview text: 28dp -> 36.5dp (+30%).
+          - QWERTY press-preview minimum width: approx 42dp on sw350 -> 56dp dedicated preview.
+          - Prime toolbar: Settings shortcut plus Clipboard/Edit shortcut.
+            The Clipboard/Edit shortcut opens the built-in text editing panel
+            (Select/Copy/Cut/Paste). This legacy app has no clipboard-history manager.
 
-          This test APK is re-signed with a new local key and therefore cannot update
-          either the official Google-signed APK or the previous test build in place.
+          This build is re-signed with a new local test key and cannot update a differently
+          signed APK in place.
           EOF
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: google-pinyin-4.5.2-height-lowercase27
+          name: google-pinyin-4.5.2-ui-v2
           retention-days: 7
           if-no-files-found: error
           path: |
-            google-pinyin-4.5.2-height-lowercase27.apk
+            google-pinyin-4.5.2-ui-v2.apk
             BUILD-NOTES.txt
             original-sha256.txt
             modified-sha256.txt
