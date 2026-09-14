@@ -1,0 +1,172 @@
+name: google-pinyin-build
+
+on:
+  push:
+    branches:
+      - tmp/google-pinyin-height
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Google Pinyin 4.5.2 APK
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl -L --fail --retry 3 --retry-delay 2 \
+            -A 'Mozilla/5.0' \
+            'https://d.apkpure.net/b/APK/com.google.android.inputmethod.pinyin?versionCode=4520313' \
+            -o google-pinyin.apk
+          unzip -t google-pinyin.apk >/dev/null
+          ls -lh google-pinyin.apk
+          sha256sum google-pinyin.apk
+
+      - name: Install apktool
+        shell: bash
+        run: |
+          set -euxo pipefail
+          APKTOOL_URL=$(curl -fsSL https://api.github.com/repos/iBotPeaches/Apktool/releases/latest \
+            | jq -r '.assets[] | select(.name | test("^apktool_[0-9].*\\.jar$")) | .browser_download_url' \
+            | head -n1)
+          test -n "$APKTOOL_URL"
+          curl -L --fail "$APKTOOL_URL" -o apktool.jar
+
+      - name: Decode and patch height presets
+        shell: bash
+        run: |
+          set -euxo pipefail
+          java -jar apktool.jar d -f google-pinyin.apk -o decoded
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path('decoded/res/values/arrays.xml')
+          s = p.read_text(encoding='utf-8')
+
+          old_entries = '''    <string-array name="entries_keyboard_height_ratio">
+                  <item>@string/kb_height_short</item>
+                  <item>@string/kb_height_midshort</item>
+                  <item>@string/kb_height_normal</item>
+                  <item>@string/kb_height_midtall</item>
+                  <item>@string/kb_height_tall</item>
+              </string-array>'''
+
+          old_values = '''    <string-array name="entryvalues_keyboard_height_ratio">
+                  <item>0.9</item>
+                  <item>0.95</item>
+                  <item>1.0</item>
+                  <item>1.05</item>
+                  <item>1.1</item>
+              </string-array>'''
+
+          # Match structurally so apktool indentation changes do not matter.
+          entries_pattern = re.compile(
+              r'<string-array name="entries_keyboard_height_ratio">.*?</string-array>',
+              re.S,
+          )
+          values_pattern = re.compile(
+              r'<string-array name="entryvalues_keyboard_height_ratio">.*?</string-array>',
+              re.S,
+          )
+
+          entries_new = '''<string-array name="entries_keyboard_height_ratio">
+                  <item>@string/kb_height_short</item>
+                  <item>@string/kb_height_midshort</item>
+                  <item>@string/kb_height_normal</item>
+                  <item>@string/kb_height_midtall</item>
+                  <item>@string/kb_height_tall</item>
+                  <item>120%</item>
+                  <item>125%</item>
+                  <item>130%</item>
+                  <item>135%</item>
+                  <item>140%</item>
+                  <item>145%</item>
+                  <item>150%</item>
+                  <item>155%</item>
+              </string-array>'''
+
+          # Existing "Tall/高" is 1.10 and is treated as 100%.
+          # New values are 1.10 * requested percentage.
+          values_new = '''<string-array name="entryvalues_keyboard_height_ratio">
+                  <item>0.9</item>
+                  <item>0.95</item>
+                  <item>1.0</item>
+                  <item>1.05</item>
+                  <item>1.1</item>
+                  <item>1.32</item>
+                  <item>1.375</item>
+                  <item>1.43</item>
+                  <item>1.485</item>
+                  <item>1.54</item>
+                  <item>1.595</item>
+                  <item>1.65</item>
+                  <item>1.705</item>
+              </string-array>'''
+
+          s2, n1 = entries_pattern.subn(entries_new, s, count=1)
+          s3, n2 = values_pattern.subn(values_new, s2, count=1)
+          if n1 != 1 or n2 != 1:
+              raise SystemExit(f'Patch target mismatch: entries={n1}, values={n2}')
+          p.write_text(s3, encoding='utf-8')
+          PY
+
+          echo '=== Patched entries ==='
+          grep -n -A18 -B2 'entries_keyboard_height_ratio' decoded/res/values/arrays.xml
+          echo '=== Patched values ==='
+          grep -n -A18 -B2 'entryvalues_keyboard_height_ratio' decoded/res/values/arrays.xml
+
+      - name: Rebuild APK
+        shell: bash
+        run: |
+          set -euxo pipefail
+          java -jar apktool.jar b decoded -o pinyin-height-unsigned.apk
+          ls -lh pinyin-height-unsigned.apk
+
+      - name: Align and sign APK
+        shell: bash
+        run: |
+          set -euxo pipefail
+          BUILD_TOOLS=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n1)
+          ZIPALIGN="$BUILD_TOOLS/zipalign"
+          APKSIGNER="$BUILD_TOOLS/apksigner"
+          "$ZIPALIGN" -f -p 4 pinyin-height-unsigned.apk pinyin-height-aligned.apk
+          keytool -genkeypair -v \
+            -keystore pinyin-test.keystore \
+            -storepass pinyin123 \
+            -keypass pinyin123 \
+            -alias pinyin-test \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname 'CN=Pinyin Height Test, OU=Open Source, O=fsyllkn, L=Test, ST=Test, C=CN'
+          "$APKSIGNER" sign \
+            --ks pinyin-test.keystore \
+            --ks-key-alias pinyin-test \
+            --ks-pass pass:pinyin123 \
+            --key-pass pass:pinyin123 \
+            --out Google-Pinyin-4.5.2-height-extended.apk \
+            pinyin-height-aligned.apk
+          "$APKSIGNER" verify --verbose --print-certs Google-Pinyin-4.5.2-height-extended.apk
+          sha256sum Google-Pinyin-4.5.2-height-extended.apk > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Verify patched resources by decoding final APK
+        shell: bash
+        run: |
+          set -euxo pipefail
+          java -jar apktool.jar d -f Google-Pinyin-4.5.2-height-extended.apk -o verify-decoded
+          grep -n -A18 -B2 'entries_keyboard_height_ratio' verify-decoded/res/values/arrays.xml
+          grep -n -A18 -B2 'entryvalues_keyboard_height_ratio' verify-decoded/res/values/arrays.xml
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Google-Pinyin-4.5.2-height-extended
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            Google-Pinyin-4.5.2-height-extended.apk
+            SHA256SUMS.txt
